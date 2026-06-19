@@ -1,0 +1,107 @@
+[
+  {
+    "id": 1,
+    "item_name": "Whole Milk",
+    "quantity": 2,
+    "size": "2 litre",
+    "price": 1.45
+  },
+  {
+    "id": 2,
+    "item_name": "Free Range Medium Eggs",
+    "quantity": 1,
+    "size": "12 pack",
+    "price": 2.35
+  },
+  {
+    "id": 3,
+    "item_name": "Unsalted Butter",
+    "quantity": 1,
+    "size": "250 g",
+    "price": 1.89
+  },
+  {
+    "id": 4,
+    "item_name": "Greek Style Yogurt",
+    "quantity": 1,
+    "size": "500 g",
+    "price": 1.25
+  },
+  {
+    "id": 5,
+    "item_name": "Cheddar Cheese",
+    "quantity": 1,
+    "size": "400 g",
+    "price": 2.5
+  },
+  {
+    "id": 6,
+    "item_name": "Sliced White Bread",
+    "quantity": 1,
+    "size": "800 g",
+    "price": 1.1
+  },
+  {
+    "id": 7,
+    "item_name": "Chicken Breast Fillets",
+    "quantity": 2,
+    "size": "300 g",
+    "price": 3.99
+  },
+  {
+    "id": 8,
+    "item_name": "Salmon Fillets",
+    "quantity": 1,
+    "size": "240 g",
+    "price": 4.5
+  },
+  {
+    "id": 9,
+    "item_name": "Broccoli",
+    "quantity": 1,
+    "size": "each",
+    "price": 0.59
+  },
+  {
+    "id": 10,
+    "item_name": "Baby Spinach",
+    "quantity": 1,
+    "size": "200 g",
+    "price": 1.2
+  },
+  {
+    "id": 11,
+    "item_name": "Tinned Chopped Tomatoes",
+    "quantity": 4,
+    "size": "400 g",
+    "price": 0.65
+  },
+  {
+    "id": 12,
+    "item_name": "Penne Pasta",
+    "quantity": 2,
+    "size": "500 g",
+    "price": 0.75
+  },
+  {
+    "id": 13,
+    "item_name": "Olive Oil",
+    "quantity": 1,
+    "size": "500 ml",
+    "price": 3.0
+  },
+  {
+    "id": 14,
+    "item_name": "Orange Juice",
+    "quantity": 1,
+    "size": "1 litre",
+    "price": 1.89
+  },
+  {
+    "id": 15,
+    "item_name": "Dark Chocolate",
+    "quantity": 2,
+    "size": "100 g",
+    "price": 1.25
+  }
+]
