@@ -25,26 +25,33 @@ To force a fresh login (e.g. after account change):
 
 import argparse
 import csv
+import os
 import re
 import sys
 import time
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # URLs, selectors & paths
 # ---------------------------------------------------------------------------
 
 LOGIN_URL    = "https://www.tesco.com/account/login/en-GB"
-ORDERS_URL   = "https://www.tesco.com/groceries/en-GB/orders"
+ORDERS_URL   = "https://www.tesco.com/shop/en-GB/orders/recent"
 SESSION_FILE = Path("data/tesco_session.json")
 
 # Selector priority lists — Tesco changes their HTML; we try each in order.
 ORDER_LINK_SELECTORS = [
+    "a[href*='/shop/en-GB/orders/']",
     "a[href*='/groceries/en-GB/orders/']",
     "[data-testid='order-link']",
     ".order-list--item a",
     ".orders-list a",
 ]
+
+ORDER_EXCLUDE_PATHS = {"/shop/en-GB/orders/upcoming", "/shop/en-GB/orders/recent", "/shop/en-GB/orders/returns"}
 
 ITEM_ROW_SELECTORS = [
     "[data-testid='product-item']",
@@ -108,6 +115,8 @@ def _find_order_urls(page, count: int) -> list[str]:
                 href = link.get_attribute("href")
                 if not href:
                     continue
+                if any(href.endswith(p) for p in ORDER_EXCLUDE_PATHS):
+                    continue
                 full = href if href.startswith("http") else "https://www.tesco.com" + href
                 if full not in seen:
                     seen.add(full)
@@ -122,26 +131,94 @@ def _find_order_urls(page, count: int) -> list[str]:
 
 
 def _extract_items(page) -> list[dict]:
-    """Extract product rows from an open order-detail page."""
-    for sel in ITEM_ROW_SELECTORS:
-        try:
-            elements = page.query_selector_all(sel)
-            if not elements:
+    """Extract product rows from an open order-detail page (receipt or amend view)."""
+    rows = _extract_receipt_items(page)
+    if not rows:
+        rows = _extract_amend_items(page)
+    return rows
+
+
+def _extract_receipt_items(page) -> list[dict]:
+    """Receipt page: uses data-testid='product-title'."""
+    rows = []
+    try:
+        titles = page.query_selector_all("[data-testid='product-title']")
+        for title_el in titles:
+            name_el = title_el.query_selector("a")
+            name = name_el.inner_text().strip() if name_el else title_el.inner_text().strip()
+            if not name:
                 continue
-            rows = []
-            for el in elements:
-                name  = _first_text(el, NAME_SELECTORS)
-                qty   = _parse_qty(_first_text(el, QTY_SELECTORS))
-                size  = _first_text(el, SIZE_SELECTORS)
-                price = _parse_price(_first_text(el, PRICE_SELECTORS))
-                if name:
-                    rows.append({"item_name": name, "quantity": qty,
-                                 "size": size, "price": price})
-            if rows:
-                return rows
-        except Exception:
-            continue
-    return []
+
+            wrapper = title_el.evaluate_handle("el => el.closest('.flexWrapper') || el.parentElement.parentElement")
+
+            price = ""
+            try:
+                price_el = wrapper.query_selector("[data-testid='receipt-total-price'], [data-testid='receipt-item-price']")
+                if price_el:
+                    price = _parse_price(price_el.inner_text())
+            except Exception:
+                pass
+
+            qty = "1"
+            try:
+                qty_el = wrapper.query_selector("[data-testid='product-quantity']")
+                if qty_el:
+                    qty = _parse_qty(qty_el.inner_text())
+                else:
+                    # Fallback: look for "Quantity : N" text in wrapper
+                    full_text = wrapper.inner_text()
+                    m = re.search(r"Quantity\s*:?\s*(\d+)", full_text, re.IGNORECASE)
+                    if m:
+                        qty = m.group(1)
+            except Exception:
+                pass
+
+            rows.append({"item_name": name, "quantity": qty, "size": "", "price": price})
+    except Exception as e:
+        print(f"Warning: receipt extraction error: {e}", file=sys.stderr)
+    return rows
+
+
+def _extract_amend_items(page) -> list[dict]:
+    """Amend/upcoming order page: uses data-testid^='imageContainer_'."""
+    rows = []
+    try:
+        anchors = page.query_selector_all("a[data-testid^='imageContainer_']")
+        for anchor in anchors:
+            li = anchor.evaluate_handle("el => el.closest('li')")
+            if not li:
+                continue
+
+            name_el = li.query_selector("h3 a")
+            name = name_el.inner_text().strip() if name_el else ""
+            if not name:
+                continue
+
+            qty = "1"
+            try:
+                for p in li.query_selector_all("p"):
+                    txt = p.inner_text().strip()
+                    m = re.match(r"^(\d+)\s+items?$", txt, re.IGNORECASE)
+                    if m:
+                        qty = m.group(1)
+                        break
+            except Exception:
+                pass
+
+            price = ""
+            try:
+                for p in li.query_selector_all("p"):
+                    txt = p.inner_text().strip()
+                    if re.search(r"\d+\.\d{2}", txt) and len(txt) < 20:
+                        price = _parse_price(txt)
+                        break
+            except Exception:
+                pass
+
+            rows.append({"item_name": name, "quantity": qty, "size": "", "price": price})
+    except Exception as e:
+        print(f"Warning: amend extraction error: {e}", file=sys.stderr)
+    return rows
 
 
 def _deduplicate_items(all_items: list[dict]) -> list[dict]:
@@ -176,8 +253,26 @@ def _accept_cookies(page) -> None:
         pass
 
 
+def _auto_login(page) -> bool:
+    """Try to fill in credentials from .env. Returns True if attempted."""
+    email = os.getenv("TESCO_EMAIL", "").strip()
+    password = os.getenv("TESCO_PASSWORD", "").strip()
+    if not email or not password:
+        return False
+    try:
+        page.fill("input[name='email']", email, timeout=5000)
+        page.fill("input[name='password']", password, timeout=5000)
+        page.click("button[type='submit']", timeout=5000)
+        print("Credentials submitted automatically.")
+        return True
+    except Exception as e:
+        print(f"Auto-login failed ({e}), please log in manually.")
+        return False
+
+
 def _wait_for_login(page, timeout_s: int = 300) -> None:
-    """Block until the user completes manual login in the browser window."""
+    """Auto-fill credentials if available, then wait for login to complete."""
+    _auto_login(page)
     print("\nPlease log in to Tesco in the browser window that just opened.")
     print("The script continues automatically once you're logged in.")
     print(f"(Waiting up to {timeout_s // 60} minutes…)\n")
@@ -185,7 +280,7 @@ def _wait_for_login(page, timeout_s: int = 300) -> None:
     while time.time() < deadline:
         try:
             if not _on_auth_page(page):
-                print(f"Login detected — continuing.")
+                print("Login detected — continuing.")
                 return
         except Exception:
             break
@@ -209,45 +304,28 @@ def scrape(out_path: Path, order_count: int = 5) -> None:
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     has_session = SESSION_FILE.exists()
 
+    CHROME_PROFILE = Path("data/chrome_profile")
+
     with sync_playwright() as pw:
-        # Always visible so the user can handle an expired session.
-        browser = pw.chromium.launch(headless=False, slow_mo=50)
-        context_kwargs = dict(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir=str(CHROME_PROFILE),
+            channel="chrome",
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
             locale="en-GB",
             viewport={"width": 1280, "height": 900},
         )
-
-        if has_session:
-            print(f"Loading saved session from {SESSION_FILE} …")
-            context = browser.new_context(storage_state=str(SESSION_FILE), **context_kwargs)
-        else:
-            context = browser.new_context(**context_kwargs)
-
+        from playwright_stealth import Stealth
         page = context.new_page()
+        Stealth().apply_stealth_sync(page)
 
         # --- Step 1: ensure we are logged in ---
-        if has_session:
-            page.goto(ORDERS_URL, wait_until="domcontentloaded")
-            time.sleep(2)
-            if _on_auth_page(page):
-                print("Saved session has expired — please log in again.")
-                page.goto(LOGIN_URL, wait_until="domcontentloaded")
-                _accept_cookies(page)
-                _wait_for_login(page)
-        else:
-            print(f"Opening {LOGIN_URL} …")
-            page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        page.goto(ORDERS_URL, wait_until="domcontentloaded")
+        time.sleep(2)
+        if _on_auth_page(page):
+            print("Not logged in — please log in to Tesco in the browser window.")
             _accept_cookies(page)
             _wait_for_login(page)
-
-        # Persist / refresh the session after successful login
-        context.storage_state(path=str(SESSION_FILE))
-        print(f"Session saved → {SESSION_FILE}")
 
         # --- Step 2: navigate to order history ---
         if ORDERS_URL not in page.url:
@@ -264,7 +342,7 @@ def scrape(out_path: Path, order_count: int = 5) -> None:
                 f"Saved page HTML to {debug_path} for selector debugging.",
                 file=sys.stderr,
             )
-            browser.close()
+            context.close()
             sys.exit(1)
 
         print(f"Found {len(order_urls)} order(s) to scrape (requested {order_count}).")
@@ -276,14 +354,16 @@ def scrape(out_path: Path, order_count: int = 5) -> None:
         for idx, order_url in enumerate(order_urls, 1):
             print(f"  [{idx}/{len(order_urls)}] {order_url}")
             page.goto(order_url, wait_until="domcontentloaded")
-            time.sleep(2)
+            time.sleep(3)
+            if idx == 1:
+                Path("data/debug_order_detail.html").write_text(page.content(), encoding="utf-8")
             items = _extract_items(page)
-            print(f"       → {len(items)} item(s)")
+            print(f"       -> {len(items)} item(s)")
             if idx == 1:
                 latest_items = items
             all_items.extend(items)
 
-        browser.close()
+        context.close()
 
     if not all_items:
         print(
@@ -303,7 +383,7 @@ def scrape(out_path: Path, order_count: int = 5) -> None:
         writer.writerows(distinct)
 
     print(f"\nDistinct items across {len(order_urls)} order(s): {len(distinct)}")
-    print(f"Saved → {out_path}")
+    print(f"Saved -> {out_path}")
 
     # Keep the latest-order-only file for backward compatibility
     if latest_items:
@@ -312,7 +392,7 @@ def scrape(out_path: Path, order_count: int = 5) -> None:
             writer = csv.DictWriter(f, fieldnames=LATEST_ORDER_COLUMNS)
             writer.writeheader()
             writer.writerows(latest_items)
-        print(f"Latest order only  → {latest_path}")
+        print(f"Latest order only  -> {latest_path}")
 
     print(f"\nNext step:  python parse_tesco.py {out_path}")
 
