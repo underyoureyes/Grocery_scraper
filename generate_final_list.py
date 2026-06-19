@@ -1,28 +1,49 @@
 """
-Step 4 — Read your confirmed review CSV and output a clean M&S shopping list.
+Step 4 — Output a clean M&S shopping list from your confirmed selections.
 
-After editing data/review.csv (mark 'yes' in the 'confirmed' column for your
-chosen match per item), run this to get a final CSV and plain-text list.
+Primary source: data/confirmed.json  (exported from the review HTML page)
+Fallback:       data/review.csv      (edit the 'confirmed' column to 'yes')
 
 Usage:
-    python generate_final_list.py [--review data/review.csv] [--out data/final_list.csv]
+    python generate_final_list.py [--confirmed data/confirmed.json] [--out data/final_list.csv]
 """
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
 
-def load_confirmed(review_path: Path) -> list[dict]:
+def load_from_json(confirmed_path: Path) -> tuple[list[dict], list]:
+    """Load confirmed items from the JSON exported by the HTML review page."""
+    rows = json.loads(confirmed_path.read_text(encoding="utf-8"))
+    # Deduplicate by item id (keep first if user somehow ticked two candidates)
+    seen: set[int] = set()
     confirmed = []
-    unmatched = []
+    for row in rows:
+        item_id = int(row["id"])
+        if item_id not in seen:
+            confirmed.append(row)
+            seen.add(item_id)
+        else:
+            print(
+                f"[warn] Item {item_id} ({row['tesco_item']!r}) confirmed twice — keeping first.",
+                file=sys.stderr,
+            )
+    return confirmed, []
+
+
+def load_from_csv(review_path: Path) -> tuple[list[dict], list]:
+    """Load confirmed items from an edited review CSV (confirmed column = 'yes')."""
+    confirmed = []
     seen_ids: set[int] = set()
+    all_ids: set[int] = set()
 
     with open(review_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+        for row in csv.DictReader(f):
             item_id = int(row["id"])
+            all_ids.add(item_id)
             if row.get("confirmed", "").strip().lower() == "yes":
                 if item_id not in seen_ids:
                     confirmed.append(row)
@@ -34,18 +55,52 @@ def load_confirmed(review_path: Path) -> list[dict]:
                         file=sys.stderr,
                     )
 
-    # Collect IDs that had no confirmed row
-    all_ids: set[int] = set()
-    with open(review_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            all_ids.add(int(row["id"]))
     unmatched = sorted(all_ids - seen_ids)
-
     if unmatched:
-        print(f"[warn] {len(unmatched)} item(s) have no confirmed match: IDs {unmatched}", file=sys.stderr)
-
+        print(f"[warn] {len(unmatched)} item(s) have no confirmed match.", file=sys.stderr)
     return confirmed, unmatched
+
+
+def load_confirmed(confirmed_arg: str | None, review_arg: str | None) -> tuple[list[dict], list]:
+    """Pick the right source: explicit arg > data/confirmed.json > Downloads > review.csv."""
+    if confirmed_arg:
+        p = Path(confirmed_arg)
+        if not p.exists():
+            print(f"Error: {p} not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Reading confirmed items from {p}")
+        return load_from_json(p)
+
+    # Check project data/ folder
+    data_json = Path("data/confirmed.json")
+    if data_json.exists():
+        print(f"Reading confirmed items from {data_json}")
+        return load_from_json(data_json)
+
+    # Check common Downloads locations (Windows / Mac / Linux)
+    home = Path.home()
+    for candidate in [
+        home / "Downloads" / "confirmed.json",
+        home / "Desktop" / "confirmed.json",
+    ]:
+        if candidate.exists():
+            print(f"Found confirmed.json in {candidate.parent} — copying to data/confirmed.json")
+            import shutil
+            data_json.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, data_json)
+            return load_from_json(data_json)
+
+    review_path = Path(review_arg or "data/review.csv")
+    if not review_path.exists():
+        print(
+            f"Error: confirmed.json not found in data/, Downloads, or Desktop.\n"
+            "Open data/review.html, tick your matches, click 'Download confirmed list',\n"
+            "then re-run this script.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"Reading confirmed items from {review_path} (CSV fallback)")
+    return load_from_csv(review_path)
 
 
 FINAL_COLUMNS = [
@@ -85,24 +140,25 @@ def print_shopping_list(rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build final M&S shopping list from confirmed review.")
-    parser.add_argument("--review", default="data/review.csv",     help="Path to your edited review CSV")
-    parser.add_argument("--out",    default="data/final_list.csv", help="Output CSV path")
+    parser.add_argument("--confirmed", default=None,               help="Path to confirmed.json from the HTML page")
+    parser.add_argument("--review",    default="data/review.csv",  help="Fallback: path to edited review CSV")
+    parser.add_argument("--out",       default="data/final_list.csv", help="Output CSV path")
     args = parser.parse_args()
 
-    review_path = Path(args.review)
-    if not review_path.exists():
-        print(f"Error: {review_path} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    confirmed, unmatched = load_confirmed(review_path)
+    confirmed, unmatched = load_confirmed(args.confirmed, args.review)
     if not confirmed:
-        print("No rows have 'confirmed=yes'. Edit the review CSV first.", file=sys.stderr)
+        print(
+            "No confirmed items found.\n"
+            "Open data/review.html, tick your matches, then click 'Download confirmed list'\n"
+            "and save the file as data/confirmed.json.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_final_csv(confirmed, out_path)
-    print(f"Final list → {out_path}  ({len(confirmed)} items confirmed)")
+    print(f"Final list -> {out_path}  ({len(confirmed)} items confirmed)")
 
     if unmatched:
         print(f"Items without a confirmed match (IDs {unmatched}) — add them manually.")

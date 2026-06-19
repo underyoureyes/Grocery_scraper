@@ -145,7 +145,7 @@ def main() -> None:
     )
     records = df.to_dict(orient="records")
     out_path.write_text(json.dumps(records, indent=2))
-    print(f"Parsed {len(df)} items → {out_path}")
+    print(f"Parsed {len(df)} items -> {out_path}")
 
     if args.print_table:
         print(df.to_string(index=False))

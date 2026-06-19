@@ -70,13 +70,31 @@ def write_html(rows: list[dict], path: Path) -> None:
         groups.setdefault(row["id"], []).append(row)
 
     html_rows = []
+    # row_data is embedded as JS so the browser can export confirmed items to JSON
+    row_data: dict[str, dict] = {}
+
     for item_id, candidates in groups.items():
         first = candidates[0]
         rowspan = len(candidates)
         for i, cand in enumerate(candidates):
+            key = f"{item_id}_{cand['rank']}"
+            row_data[key] = {
+                "id":          item_id,
+                "tesco_item":  first["tesco_item"],
+                "tesco_size":  first["tesco_size"],
+                "tesco_qty":   first["tesco_qty"],
+                "tesco_price": first["tesco_price"],
+                "rank":        cand["rank"],
+                "mands_name":  cand["mands_name"],
+                "mands_size":  cand["mands_size"],
+                "mands_price": cand["mands_price"],
+                "mands_url":   cand["mands_url"],
+                "score":       cand["score"],
+                "source":      cand["source"],
+            }
+
             cells = []
             if i == 0:
-                # Tesco columns span all candidate rows
                 cells.append(f'<td rowspan="{rowspan}">{item_id}</td>')
                 cells.append(f'<td rowspan="{rowspan}">{first["tesco_item"]}</td>')
                 cells.append(f'<td rowspan="{rowspan}">{first["tesco_size"]}</td>')
@@ -92,8 +110,12 @@ def write_html(rows: list[dict], path: Path) -> None:
             score_pct = f'{cand["score"]}%' if cand["score"] != "" else ""
             cells.append(f'<td>{score_pct}</td>')
             cells.append(f'<td>{cand["source"]}</td>')
-            cells.append('<td><input type="checkbox" class="confirm-cb"></td>')
-            cells.append('<td><input type="text" class="notes-input" placeholder="notes..."></td>')
+            score_val = cand["score"] if cand["score"] != "" else 0
+            cells.append(
+                f'<td><input type="checkbox" class="confirm-cb"'
+                f' data-key="{key}" data-rank="{cand["rank"]}" data-score="{score_val}"></td>'
+            )
+            cells.append(f'<td><input type="text" class="notes-input" data-key="{key}" placeholder="notes..."></td>')
             html_rows.append(f'  <tr>{"".join(cells)}</tr>')
 
     header_cols = [
@@ -102,33 +124,114 @@ def write_html(rows: list[dict], path: Path) -> None:
         "Confirm", "Notes",
     ]
     headers = "".join(f"<th>{h}</th>" for h in header_cols)
+    row_data_js = json.dumps(row_data, ensure_ascii=False)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Tesco → M&amp;S Review</title>
+<title>Tesco to M&amp;S Review</title>
 <style>
   body {{ font-family: sans-serif; font-size: 13px; padding: 16px; }}
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ border: 1px solid #ccc; padding: 6px 8px; vertical-align: top; }}
   th {{ background: #f0f0f0; text-align: left; }}
   tr:hover td {{ background: #fafafa; }}
+  tr.auto-confirmed td {{ background: #efffef; }}
   .confirm-cb {{ transform: scale(1.3); }}
   .notes-input {{ width: 140px; }}
   a {{ color: #006400; }}
+  .btn-bar {{ margin-bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
+  .btn-bar button {{
+    padding: 7px 14px; border: 1px solid #999; border-radius: 4px;
+    cursor: pointer; font-size: 13px; background: #f8f8f8;
+  }}
+  .btn-bar button:hover {{ background: #e8e8e8; }}
+  #auto-btn {{ background: #006400; color: #fff; border-color: #004d00; }}
+  #auto-btn:hover {{ background: #004d00; }}
+  #dl-btn {{ background: #004080; color: #fff; border-color: #002d5a; }}
+  #dl-btn:hover {{ background: #002d5a; }}
+  #stats {{ color: #555; font-size: 12px; }}
 </style>
 </head>
 <body>
-<h2>Tesco → M&amp;S Match Review</h2>
-<p>Tick the M&amp;S candidate you want for each Tesco item, add notes, then use
-   <code>generate_final_list.py</code> to produce your shopping list.</p>
+<h2>Tesco to M&amp;S Match Review</h2>
+<div class="btn-bar">
+  <button id="auto-btn" onclick="autoConfirm()">Auto-confirm matches &gt;50%</button>
+  <button onclick="uncheckAll()">Uncheck all</button>
+  <button id="dl-btn" onclick="downloadConfirmed()">Download confirmed list</button>
+  <span id="stats"></span>
+</div>
+<p>
+  1. Tick your chosen M&amp;S match for each item (or click Auto-confirm).<br>
+  2. Click <strong>Download confirmed list</strong> and save as
+     <code>data/confirmed.json</code> in the project folder.<br>
+  3. Run <code>python generate_final_list.py</code>.
+</p>
 <table>
 <thead><tr>{headers}</tr></thead>
 <tbody>
 {"".join(html_rows)}
 </tbody>
 </table>
+<script>
+  var ROW_DATA = {row_data_js};
+
+  function autoConfirm() {{
+    var checked = 0;
+    document.querySelectorAll('.confirm-cb').forEach(function(cb) {{
+      if (parseInt(cb.dataset.rank, 10) === 1 && parseFloat(cb.dataset.score) > 50) {{
+        cb.checked = true;
+        cb.closest('tr').classList.add('auto-confirmed');
+        checked++;
+      }}
+    }});
+    updateStats();
+  }}
+
+  function uncheckAll() {{
+    document.querySelectorAll('.confirm-cb').forEach(function(cb) {{
+      cb.checked = false;
+      cb.closest('tr').classList.remove('auto-confirmed');
+    }});
+    updateStats();
+  }}
+
+  function downloadConfirmed() {{
+    var confirmed = [];
+    document.querySelectorAll('.confirm-cb:checked').forEach(function(cb) {{
+      var key = cb.dataset.key;
+      var row = Object.assign({{}}, ROW_DATA[key]);
+      // grab notes from the input in the same row
+      var notesEl = cb.closest('tr').querySelector('.notes-input');
+      row.notes = notesEl ? notesEl.value : '';
+      confirmed.push(row);
+    }});
+    if (confirmed.length === 0) {{
+      alert('No items ticked — tick some items first.');
+      return;
+    }}
+    var json = JSON.stringify(confirmed, null, 2);
+    var blob = new Blob([json], {{type: 'application/json'}});
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'confirmed.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }}
+
+  function updateStats() {{
+    var total = document.querySelectorAll('.confirm-cb:checked').length;
+    document.getElementById('stats').textContent = total + ' item(s) confirmed.';
+  }}
+
+  document.addEventListener('change', function(e) {{
+    if (e.target.classList.contains('confirm-cb')) updateStats();
+  }});
+</script>
 </body>
 </html>
 """
@@ -154,12 +257,12 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_csv(rows, out_path)
-    print(f"Review CSV → {out_path}  ({len(matches)} items, {len(rows)} candidate rows)")
+    print(f"Review CSV -> {out_path}  ({len(matches)} items, {len(rows)} candidate rows)")
 
     if args.html:
         html_path = out_path.with_suffix(".html")
         write_html(rows, html_path)
-        print(f"Review HTML → {html_path}")
+        print(f"Review HTML -> {html_path}")
 
 
 if __name__ == "__main__":
